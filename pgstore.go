@@ -34,6 +34,9 @@ type PGSession struct {
 	ExpiresOn  time.Time
 }
 
+// PGSession Table name
+var table string = "http_sessions"
+
 // NewPGStore creates a new PGStore instance and a new database/sql pool.
 // This will also create in the database the schema needed by pgstore.
 func NewPGStore(dbURL string, keyPairs ...[]byte) (*PGStore, error) {
@@ -66,6 +69,38 @@ func NewPGStoreFromPool(db *sql.DB, keyPairs ...[]byte) (*PGStore, error) {
 
 	return dbStore, nil
 }
+
+func NewPGStoreWithSchema(dbURL string, schema string,keyPairs ...[]byte) (*PGStore, error) {
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		// Ignore and return nil.
+		return nil, err
+	}
+	return NewPGStoreFromPoolWithSchema(db, schema, keyPairs...)
+}
+
+// NewPGStoreFromPool creates a new PGStore instance from an existing
+// database/sql pool.
+// This will also create the database schema needed by pgstore.
+func NewPGStoreFromPoolWithSchema(db *sql.DB, schema string, keyPairs ...[]byte) (*PGStore, error) {
+	dbStore := &PGStore{
+		Codecs: securecookie.CodecsFromPairs(keyPairs...),
+		Options: &sessions.Options{
+			Path:   "/",
+			MaxAge: 86400 * 30,
+		},
+		DbPool: db,
+	}
+
+	// Create table if it doesn't exist
+	err := dbStore.createSessionsTableWithName(schema)
+	if err != nil {
+		return nil, err
+	}
+
+	return dbStore, nil
+}
+
 
 // Close closes the database connection.
 func (db *PGStore) Close() {
@@ -228,7 +263,28 @@ func (db *PGStore) destroy(session *sessions.Session) error {
 }
 
 func (db *PGStore) createSessionsTable() error {
-	stmt := `CREATE TABLE IF NOT EXISTS http_sessions (
+	stmt := `CREATE TABLE IF NOT EXISTS `+table+` (
+              id BIGSERIAL PRIMARY KEY,
+              key BYTEA,
+              data BYTEA,
+              created_on TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+              modified_on TIMESTAMPTZ,
+              expires_on TIMESTAMPTZ);`
+
+	_, err := db.DbPool.Exec(stmt)
+	if err != nil {
+		return errors.Wrapf(err, "Unable to create http_sessions table in the database")
+	}
+
+	return nil
+}
+
+func (db *PGStore) createSessionsTableWithName(tableName string) error {
+	if strings.TrimSpace(tableName) == "" {
+		return errors.New("Please provide a tablename or schema.tablename")
+	}
+	table = tableName
+	stmt := `CREATE TABLE IF NOT EXISTS ` +tableName+ ` (
               id BIGSERIAL PRIMARY KEY,
               key BYTEA,
               data BYTEA,
@@ -245,7 +301,7 @@ func (db *PGStore) createSessionsTable() error {
 }
 
 func (db *PGStore) selectOne(s *PGSession, key string) error {
-	stmt := "SELECT id, key, data, created_on, modified_on, expires_on FROM http_sessions WHERE key = $1"
+	stmt := "SELECT id, key, data, created_on, modified_on, expires_on FROM "+table+" WHERE key = $1"
 	err := db.DbPool.QueryRow(stmt, key).Scan(&s.ID, &s.Key, &s.Data, &s.CreatedOn, &s.ModifiedOn, &s.ExpiresOn)
 	if err != nil {
 		return errors.Wrapf(err, "Unable to find session in the database")
@@ -255,7 +311,7 @@ func (db *PGStore) selectOne(s *PGSession, key string) error {
 }
 
 func (db *PGStore) insert(s *PGSession) error {
-	stmt := `INSERT INTO http_sessions (key, data, created_on, modified_on, expires_on)
+	stmt := `INSERT INTO `+table+` (key, data, created_on, modified_on, expires_on)
            VALUES ($1, $2, $3, $4, $5)`
 	_, err := db.DbPool.Exec(stmt, s.Key, s.Data, s.CreatedOn, s.ModifiedOn, s.ExpiresOn)
 
@@ -263,7 +319,7 @@ func (db *PGStore) insert(s *PGSession) error {
 }
 
 func (db *PGStore) update(s *PGSession) error {
-	stmt := `UPDATE http_sessions SET data=$1, modified_on=$2, expires_on=$3 WHERE key=$4`
+	stmt := `UPDATE `+table+` SET data=$1, modified_on=$2, expires_on=$3 WHERE key=$4`
 	_, err := db.DbPool.Exec(stmt, s.Data, s.ModifiedOn, s.ExpiresOn, s.Key)
 
 	return err
